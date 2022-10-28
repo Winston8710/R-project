@@ -3,7 +3,10 @@ R-project
 
 ##1 
 建立分類模型
-![image](https://user-images.githubusercontent.com/101661953/198525418-5e8acfba-fce0-4924-8397-f8f7bc3f4f36.png)
+1. 三個月內沒有消費 - S1過客
+2. 三個月內消費過一次 - N1新顧客
+3. 三個月內消費一次以上，且頻率大於10次 - R1 忠實顧客
+4. 三個月內消費一次以上，且頻率小於10次 - R2 一般顧客
 
 ##2 Classification Model
 ![image](https://user-images.githubusercontent.com/101661953/198525508-8eb3393e-996c-483e-9255-18c2ca1f3f90.png)
