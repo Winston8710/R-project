@@ -1,0 +1,526 @@
+---
+title: TF56_資料切割與建立模型 
+author: 第三組
+date: "`r Sys.time()`"
+output:
+  html_document:
+    highlight: pygments
+    theme: flatly
+    css: ../etc/style.css
+---
+
+<br>
+
+### 資料準備流程
+
+<center>
+
+![Fig-3: Data Preparation](fig/preparation.jpg)
+
+</center>
+
+<hr>
+
+### Preparing The Predictors (X)
+```{r echo=T, message=F, cache=F, warning=F}
+rm(list=ls(all=TRUE))
+pacman::p_load(magrittr,latex2exp,Matrix,dplyr,tidyr,ggplot2,caTools,plotly)
+load("data/tf0.rdata")
+```
+
+##### The Demarcation Date
+Remove data after the demarcation date
+```{r}
+feb01 = as.Date("2001-02-01")
+Z = subset(Z0, date < feb01)    # 618212
+```
+
+##### Aggregate for the Transaction Records
+```{r}
+X = group_by(Z, tid) %>% summarise(
+  date = first(date),  # 交易日期
+  cust = first(cust),  # 顧客 ID
+  age = first(age),    # 顧客 年齡級別
+  area = first(area),  # 顧客 居住區別
+  items = n(),                # 交易項目(總)數
+  pieces = sum(qty),          # 產品(總)件數
+  total = sum(price),         # 交易(總)金額
+  gross = sum(price - cost)   # 毛利
+  ) %>% data.frame  # 88387
+```
+
+```{r}
+summary(X)
+```
+
+##### Check Quantile and Remove Outlier 
+```{r}
+sapply(X[,6:9], quantile, prob=c(.999, .9995, .9999))
+```
+
+```{r}
+X = subset(X, items<=64 & pieces<=98 & total<=11260) # 88387 -> 88295
+```
+
+##### Aggregate for Customer Records
+```{r}
+d0 = max(X$date) + 1
+A = X %>% mutate(
+  days = as.integer(difftime(d0, date, units="days"))
+  ) %>% 
+  group_by(cust) %>% summarise(
+    r = min(days),      # recency
+    s = max(days),      # seniority
+    f = n(),            # frquency
+    m = mean(total),    # monetary
+    rev = sum(total),   # total revenue contribution
+    raw = sum(gross),   # total gross profit contribution
+    age = age[1],       # age group
+    area = area[1],     # area code
+  ) %>% data.frame      # 28584
+nrow(A)
+```
+<br><br><hr>
+
+### Preparing the Target Variables (Y)
+
+##### Aggregate Feb's Transaction by Customer
+```{r}
+feb = filter(X0, date>= feb01) %>% group_by(cust) %>% 
+  summarise(amount = sum(total))  # 16900
+```
+
+##### The Target for Regression - `A$amount`
+Simply a Left Joint
+```{r}
+A = merge(A, feb, by="cust", all.x=T)
+```
+
+##### The Target for Classification - `A$buy`
+```{r}
+A$buy = !is.na(A$amount)
+table(A$buy, !is.na(A$amount))
+```
+
+##### Summary of the Dataset
+```{r}
+summary(A)
+```
+<br><br><hr>
+
+### Preparing Train & Test Datasets
+
+##### Train & Test Dataset
+```{r}
+X = subset(X, cust %in% A$cust & date < as.Date("2001-02-01"))
+Z = subset(Z, cust %in% A$cust & date < as.Date("2001-02-01"))
+set.seed(2018); spl = sample.split(A$buy, SplitRatio=0.7) 
+c(nrow(A), sum(spl), sum(!spl))
+```
+
+```{r fig.height=3, fig.width=7}
+cbind(A, spl) %>% filter(buy) %>%  
+  ggplot(aes(x=log(amount))) + geom_density(aes(fill=spl), alpha=0.5)
+```
+
+
+```{r}
+A2 = subset(A, buy) %>% mutate_at(c("m","rev","amount"), log10)
+n = nrow(A2)
+set.seed(2018); spl2 = 1:n %in% sample(1:n, round(0.7*n))
+c(nrow(A2), sum(spl2), sum(!spl2))
+```
+
+```{r fig.height=3, fig.width=7}
+cbind(A2, spl2) %>% 
+  ggplot(aes(x=amount)) + geom_density(aes(fill=spl2), alpha=0.5)
+```
+
+
+```{r}
+save(Z, X, A, spl, spl2, file="data/tf3.rdata")
+```
+<br>
+
+<center>
+
+![Fig-4: Data Spliting](fig/spliting.jpg)
+
+</center>
+##### Spliting for Classification 
+```{r}
+TR = subset(A, spl)
+TS = subset(A, !spl)
+```
+<br><hr>
+
+### Classification Model
+```{r}
+glm1 = glm(buy ~ ., TR[,c(2:9, 11)], family=binomial()) 
+summary(glm1)
+```
+
+```{r}
+pred =  predict(glm1, TS, type="response")
+cm = table(actual = TS$buy, predict = pred > 0.5); cm
+```
+
+```{r}
+acc.ts = cm %>% {sum(diag(.))/sum(.)}
+c(1-mean(TS$buy) , acc.ts)  # 0.69998
+```
+
+```{r}
+colAUC(pred, TS$buy)        # 0.7556
+```
+<br><hr>
+
+### Regression Model
+```{r}
+A2 = subset(A, A$buy) %>% mutate_at(c("m","rev","amount"), log10)
+TR2 = subset(A2, spl2)
+TS2 = subset(A2, !spl2)
+```
+
+```{r}
+lm1 = lm(amount ~ ., TR2[,c(2:6,8:10)])
+summary(lm1)
+```
+
+```{r}
+r2.tr = summary(lm1)$r.sq
+SST = sum((TS2$amount - mean(TR2$amount))^ 2)
+SSE = sum((predict(lm1, TS2) -  TS2$amount)^2)
+r2.ts = 1 - (SSE/SST)
+c(R2train=r2.tr, R2test=r2.ts)
+```
+<br><hr>
+
+### 製作變數、改進模型
+
+<br><hr>
+###加入品項數與顧客分群
+```{r}
+A00 = X %>% mutate(
+  days = as.integer(difftime(d0, date, units="days"))
+  ) %>% 
+  group_by(cust) %>% summarise(
+    r = min(days),s = max(days), f = n(), m = mean(total), rev = sum(total), raw = sum(gross), age = age[1],  area = area[1], items = mean(items), period=s-r ) %>% data.frame      # 28584
+nrow(A00)
+```
+
+```{r}
+STS = c("N1","R1","R2","S1")
+Status = function(rx,fx,sx,dx) {factor(
+  ifelse(dx == 0,
+         ifelse(rx <90  , "N1","S1"),
+         ifelse( dx/fx <10 ,"R2","R1")), STS)} 
+A1 = A00 %>%  mutate(group=Status(r,f,s,period))
+N1 = A1 %>% filter(group=="N1")%>%pull(cust)
+S1 = A1 %>% filter(group=="S1")%>%pull(cust)
+R1 = A1 %>% filter(group=="R1")%>%pull(cust)
+R2 = A1 %>% filter(group=="R2")%>%pull(cust)
+```
+##### 數值型迴歸(用來預測購買金額) - `A$amount`
+Simply a Left Joint
+```{r}
+A1 = merge(A1, feb, by="cust", all.x=T)
+```
+
+##### 類別型迴歸(用來預測回購機率) - `A$buy`
+```{r}
+A1$buy = !is.na(A1$amount)
+table(A1$buy, !is.na(A1$amount))
+```
+##### Summary of the Dataset
+```{r}
+summary(A1)
+```
+
+```{r}
+X1 = subset(X, cust %in% A1$cust & date < as.Date("2001-02-01"))
+Z1 = subset(Z, cust %in% A1$cust & date < as.Date("2001-02-01"))
+set.seed(2018); spl3 = sample.split(A1$buy, SplitRatio=0.7) #將資料用隨機數選擇後，進行切割
+c(nrow(A1), sum(spl3), sum(!spl3))
+```
+
+
+```{r}
+A12 = subset(A1, buy) %>% mutate_at(c("m","rev","amount"), log10)
+n = nrow(A12)
+set.seed(2018); spl4 = 1:n %in% sample(1:n, round(0.7*n))
+c(nrow(A12), sum(spl4), sum(!spl4))
+```
+
+##### Spliting for Classification 
+```{r}
+TR3 = subset(A1, spl3)
+TS3 = subset(A1, !spl3)
+```
+<br><hr>
+
+### Classification Model
+```{r}
+glm2 = glm(buy ~ ., TR3[,c(2:10,12, 14)], family=binomial()) 
+summary(glm2)
+```
+
+```{r}
+pred2 =  predict(glm2, TS3, type="response")
+cm = table(actual = TS3$buy, predict = pred2 > 0.5); cm
+```
+
+```{r}
+acc.ts = cm %>% {sum(diag(.))/sum(.)}
+c(1-mean(TS3$buy) , acc.ts)  # 0.7010261
+```
+
+```{r}
+colAUC(pred2, TS3$buy)        # 0.7564
+tsAUC2 = colAUC(pred2, y=TS3$buy, plotROC=T)
+```
+<br><hr>
+
+### Regression Model
+```{r}
+A12 = subset(A1, A1$buy) %>% mutate_at(c("m","rev","amount"), log10)
+TR4 = subset(A12, spl4)
+TS4 = subset(A12, !spl4)
+```
+
+```{r}
+lm2 = lm(amount ~ ., TR4[,c(2:6,8:10,12,13)])
+summary(lm2)
+```
+
+```{r}
+r2.tr2 = summary(lm2)$r.sq
+SST2 = sum((TS4$amount - mean(TR4$amount))^ 2)
+SSE2 = sum((predict(lm2, TS4) -  TS4$amount)^2)
+r2.ts2 = 1 - (SSE/SST)
+c(R2train2=r2.tr2, R2test2=r2.ts2)
+```
+<br><hr>
+### 進行預測
+
+<center>
+
+![Fig-3: Prediction](fig/prediction.png)
+</center>
+
+<hr>
+
+Aggregate data 2000-12-01 ~ 2001~02-28. 
+```{r}
+load("data/tf0.rdata")
+d0 = max(X0$date) + 1
+B = X0 %>% 
+  filter(date >= as.Date("2000-12-01")) %>% 
+  mutate(days = as.integer(difftime(d0, date, units="days"))) %>% 
+  group_by(cust) %>% summarise(
+    r = min(days),      # recency
+    s = max(days),      # seniority
+    f = n(),            # frquency
+    m = mean(total),    # monetary
+    rev = sum(total),   # total revenue contribution
+    raw = sum(gross),   # total gross profit contribution
+    age = age[1],       # age group
+    area = area[1],     # area code
+    items = mean(items), 
+    period=s-r
+  ) %>% data.frame      # 28584
+nrow(B)
+```
+```{r}
+STS = c("N1","R1","R2","S1")
+Status = function(rx,fx,sx,dx) {factor(
+  ifelse(dx == 0,
+         ifelse(rx <90  , "N1","S1"),
+         ifelse( dx/fx <10 ,"R2","R1")), STS)} 
+B1 = B %>%  mutate(group=Status(r,f,s,period))
+N1 = B1 %>% filter(group=="N1")%>%pull(cust)
+S1 = B1 %>% filter(group=="S1")%>%pull(cust)
+R1 = B1 %>% filter(group=="R1")%>%pull(cust)
+R2 = B1 %>% filter(group=="R2")%>%pull(cust)
+```
+
+
+In `B`, there is a record for each customer. `B$Buy` is the probability of buying in March.
+```{r}
+B1$Buy = predict(glm1, B1, type="response")
+```
+
+<span style="font-size:24px">`r "\U1F4A1"`：</span>
+預測購買金額時要記得做指數、對數轉換！
+
+```{r}
+B2 = B1 %>% mutate_at(c("m","rev"), log10)
+B1$Rev = 10^predict(lm1, B2)
+```
+
+```{r fig.height=2.4, fig.width=7.2}
+par(mfrow=c(1,2), cex=0.8)
+hist(B1$Buy)
+hist(log(B1$Rev,10))
+```
+
+```{r}
+save(B1, file='data/tf4.rdata')
+```
+
+```{r}
+B1$Buy2 = predict(glm2, B1, type="response")
+```
+
+```{r}
+B1$Rev2 = 10^predict(lm2, B2)
+```
+
+```{r fig.height=2.4, fig.width=7.2}
+par(mfrow=c(1,2), cex=0.8)
+hist(B1$Buy2)
+hist(log(B1$Rev2,10))
+hist(B1$Buy)
+hist(log(B1$Rev,10))
+```
+```{r}
+B1 %>% group_by(group)%>%summarise(buy=mean(Buy2),rev=mean(Rev2)) #各族群的回購機率和預期購買金額
+```
+```{r}
+sum(B1$raw)/sum(B1$rev) #公司目前獲利率
+```
+
+```{r}
+g = 0.15   # (稅前)獲利率
+N = 5     # 期數 = 5
+d = 0.1   # 利率 = 10%
+B1$CLV = g * B1$Rev2 * rowSums(sapply(
+  0:N, function(i) (B1$Buy2/(1+d))^i ) )
+
+summary(B1$CLV) #估計顧客終生價值(CLV)
+```
+
+```{r fig.height=2.5, fig.width=7.2}
+par(mar=c(2,2,3,1), cex=0.8)
+hist(log(B1$CLV,10), xlab="", ylab="")
+```
+
+```{r}
+# 各族群的平均營收貢獻、保留機率、終生價值
+B1 %>% group_by(group) %>% summarise_at(vars(Buy2:CLV), mean)
+```
+###繪製顧客終生價值對顧客狀態分群的盒狀圖。
+```{r}
+par(mar=c(3,3,4,2), cex=0.8)
+boxplot(log(CLV,10)~group, B1, main="CLV by Groups")
+```
+**估計每位顧客的淨收益** $\hat{R}(x)$
+```{r fig.height=3, fig.width=5}
+m=0.2; b=25; a=40; x=30
+DP = function(x,m0,b0,a0) {m0*plogis((10/a0)*(x-b0))}
+dp = pmin(1-B1$Buy2, DP(x,m,b,a))
+eR = dp*B1$Rev2*g - x
+hist(eR,main="預期淨收益分佈",xlab="預期淨收益",ylab="顧客人數")
+```
+```{r fig.height=3, fig.width=7}
+mm=c(0.20, 0.25, 0.15, 0.25)
+bb=c(  25,   30,   15,   30)
+aa=c(  40,   40,   30,   60) 
+X = seq(0,60,2) 
+do.call(rbind, lapply(1:length(mm), function(i) data.frame(
+  Inst=paste0('Inst',i), Cost=X, 
+  Gain=DP(X,mm[i],bb[i],aa[i])
+  ))) %>% data.frame %>% 
+  ggplot(aes(x=Cost, y=Gain, col=Inst)) +
+  geom_line(size=1.5,alpha=0.5) + theme_bw() +
+  ggtitle("Prob. Function: f(x|m,b,a)")
+```
+
+```{r warning=F, fig.height=8, fig.width=8}
+X = seq(10, 60, 1) 
+df = do.call(rbind, lapply(1:length(mm), function(i) {
+  sapply(X, function(x) {
+    dp = pmin(1-B1$Buy2, DP(x,mm[i],bb[i],aa[i]))
+    eR = dp*B1$Rev2*g - x
+    c(i=i, x=x, eR.ALL=sum(eR), N=sum(eR>0), eR.SEL=sum(eR[eR > 0]) )
+    }) %>% t %>% data.frame
+  })) 
+
+df %>% 
+  mutate_at(vars(eR.ALL, eR.SEL), function(y) round(y/1000)) %>% 
+  gather('key','value',-i,-x) %>% 
+  mutate(Instrument = paste0('I',i)) %>%
+  ggplot(aes(x=x, y=value, col=Instrument)) + 
+  geom_hline(yintercept=0, linetype='dashed', col='blue') +
+  geom_line(size=1.5,alpha=0.5) + 
+  xlab('工具選項(成本)') + ylab('預期收益($K)') + 
+  ggtitle('行銷工具優化','假設行銷工具的效果是其成本的函數') +
+    facet_wrap(~key,ncol=1,scales='free_y') + theme_bw() -> p
+
+plotly::ggplotly(p)
+```
+```{r}
+ci = sapply(
+  list(c("N1"),c("R1"),
+       c("R2"),c("S1")), 
+  function(v) B1$group %in% v)  
+
+X2 = seq(10, 60, 1) 
+df = do.call(rbind, lapply(1:length(mm), function(i) {
+  sapply(X2, function(x) {
+    dp = pmin(1- B1$Buy2[ ci[,i] ]  , DP(x,mm[i],bb[i],aa[i]))
+    eR = dp* B1$Rev2[ ci[,i] ]  *g - x
+    c(i=i, x=x, eR.ALL=sum(eR), N=sum(eR>0), eR.SEL=sum(eR[eR > 0]) )
+    }) %>% t %>% data.frame
+  })) 
+
+group_by(df, i) %>% top_n(1,eR.SEL)
+```
+<br>
+
+<p class="qiz">
+<span style="font-size:18px"> 🚴 討論行銷方案：</span><br>
+如果上述4組工具參數分別是4種行銷工具對4個顧客族群的效果：<br>
+&emsp; ■ `I1 : N1`<br>
+&emsp; ■ `I2 : R1`<br>
+&emsp; ■ `I3 : R2`<br>
+&emsp; ■ `I4 : S1`<br>
+針對這4個顧客族群之中選擇行銷對象：<br>
+&emsp; ■ 選擇行銷對象(`N`)<br>
+&emsp; &emsp; <z>對`N1`族群中的`2405`位顧客；</z><br>
+&emsp; &emsp; <z>對`R1`族群中的`2554`位顧客；</z><br>
+&emsp; &emsp; <z>對`R2`族群中的`1341`位顧客；</z><br>
+&emsp; &emsp; <z>對`S1`族群中的`30`位顧客，總共`6330`位顧客做行銷。</z><br>
+&emsp; ■ 設定行銷工具的面額(`x`)<br>
+&emsp; &emsp; <z>對`N1`族群發送`35元`價值的折價券；</z><br>
+&emsp; &emsp; <z>對`R1`族群發送`40元`價值的滿額外送免運券；</z><br>
+&emsp; &emsp; <z>對`R2`族群發送`21元`價值的組合包優惠；</z><br>
+&emsp; &emsp; <z>對`S1`族群發送`44元`價值的試吃包。</z><br>
+&emsp; ■ 估計預期報償(`eR.SEL`)？<br>
+&emsp; &emsp; <z>預計`N1`族群帶來報償為`43943.6元`；</z><br>
+&emsp; &emsp; <z>預計`R1`族群帶來報償為`41533.04元`；</z><br>
+&emsp; &emsp; <z>預計`R2`族群帶來報償為`10911.4元`；</z><br>
+&emsp; &emsp; <z>預計`S1`族群帶來報償為`801.18元`，總預期報償為`97,189.22`元。</z><br>
+</p class="qiz"><br>
+
+<br>
+####期末報告─完整的行銷方案
+
+###1.經營現況：期中報告精華(地區、年齡、顧客分群的消費特性)(期中1+2)+上字幕-秉
+###2.改善策略：根據顧客族群價值屬性(地理、年齡、產品),選取行銷重點、設定行銷目標(期中3+4)-寧
+###3.製作模型：找出影響回購機率和金額的主要變數、預測顧客未來價值→作為行銷方案設計參考-萱
+###4.行銷方案：根據各族群特徵設計行銷工具與方案-荃
+###5.預期成效：對方案的成本、效益進行假設+統整PPT-郁
+
+####時程
+
+###1. PPT各自部分繳交：6/12 晚上12點前
+###2. 討論+錄音完成：6/13 下午1:00
+###3. 字幕完成：6/14前
+
+
+
+
+<br><br><hr>
+<br><hr>
+
