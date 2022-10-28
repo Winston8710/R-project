@@ -28,4 +28,5 @@ R-project
 ![image](https://user-images.githubusercontent.com/101661953/198526070-034d6dd0-baac-4c7b-84bf-1d0ebd548e7d.png)
 
 ##8 針對四個客群行銷之預期成本效益
-![image](https://user-images.githubusercontent.com/101661953/198526263-144e9dff-0730-4150-9118-c0cb31aa0de0.png)
+![image](https://user-images.githubusercontent.com/101661953/198526854-96ac47d1-9b92-42b3-8313-b455c06b7e95.png)
+
